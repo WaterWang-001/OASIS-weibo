@@ -1,1 +1,23 @@
-*
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual Environments
+.venv/
+venv/
+env/
+oasis/
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+
+# Log / DB files
+*.log
+*.db

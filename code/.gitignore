@@ -1,0 +1,14 @@
+# system
+*.pyc __pycache__/
+
+# data / outputs / local env
+data/
+output/
+MARS/data_process/output/
+Qwen2.5-7B-Instruct/
+_env/
+.env
+.vscode/
+
+# lfs will track weights, but ignore any other temp files
+*.aria2*
