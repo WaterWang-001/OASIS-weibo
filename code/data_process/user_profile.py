@@ -21,11 +21,11 @@ class WeiboToOASISConverter:
     """将微博数据转换为OASIS平台格式的转换器"""
     
     def __init__(self):
-        self.users_data = []
-        self.processed_users = set()
+        # <--- 修改点 1: 使用字典来存储数据，以用户ID为键
+        # 这将自动处理重复用户，并保留最后一次见到的数据
+        self.users_data = {} 
+        # self.processed_users = set() # <--- 移除：不再需要
         self.file_stats = {}
-        
-        # (已移除 personality_traits 和 interest_categories)
     
     def extract_users_from_json(self, json_data):
         """从JSON数据中提取用户信息"""
@@ -46,9 +46,14 @@ class WeiboToOASISConverter:
         """解析单个用户数据"""
         user_id = user_data.get('sjcjId', '')
         
-        if user_id in self.processed_users:
+        # <--- 修改点 2: 移除了 set 检查
+        # 只需确保 user_id 存在
+        if not user_id:
             return None
-        self.processed_users.add(user_id)
+        
+        # if user_id in self.processed_users: <--- 移除
+        #     return None
+        # self.processed_users.add(user_id) <--- 移除
         
         user = {
             'user_id': user_id,
@@ -150,7 +155,8 @@ class WeiboToOASISConverter:
                     
                     for user in users:
                         if user:
-                            self.users_data.append(user)
+                            # <--- 修改点 3: 使用字典赋值，自动覆盖旧数据
+                            self.users_data[user['user_id']] = user
                             users_in_file += 1
                             
                 except json.JSONDecodeError as e:
@@ -165,10 +171,10 @@ class WeiboToOASISConverter:
         self.file_stats[filename] = {
             'total_lines': line_count,
             'errors': error_count,
-            'users_extracted': users_in_file
+            'users_extracted': users_in_file # 注意：这现在是"处理的条目数"，不是唯一用户数
         }
         
-        logging.info(f"✓ {filename}: {users_in_file} users from {line_count} lines")
+        logging.info(f"✓ {filename}: {users_in_file} user entries from {line_count} lines")
     
     def process_all_files(self):
         txt_files = list(INPUT_FOLDER.glob('*.txt'))
@@ -183,7 +189,8 @@ class WeiboToOASISConverter:
             logging.info(f"\n[{i}/{len(txt_files)}] Processing...")
             self.process_single_file(filepath)
         
-        logging.info(f"\n✓ Total unique users: {len(self.processed_users)}")
+        # <--- 修改点 4: 从字典长度获取唯一用户数
+        logging.info(f"\n✓ Total unique users: {len(self.users_data)}")
     
     def save_to_csv(self, filename='oasis_twitter_users.csv'):
         if not self.users_data:
@@ -192,7 +199,8 @@ class WeiboToOASISConverter:
             
         output_path = OUTPUT_FOLDER / filename
         
-        df = pd.DataFrame(self.users_data)
+        # <--- 修改点 5: 从字典的 .values() 创建 DataFrame
+        df = pd.DataFrame(self.users_data.values())
         df = df.sort_values('influence_score', ascending=False)
         
         df.to_csv(output_path, index=False, encoding='utf-8')
@@ -204,7 +212,8 @@ class WeiboToOASISConverter:
         if not self.users_data:
             return "No data to summarize"
             
-        df = pd.DataFrame(self.users_data)
+        # <--- 修改点 6: 从字典的 .values() 创建 DataFrame
+        df = pd.DataFrame(self.users_data.values())
         
         report = f"""
 {'='*60}
@@ -220,58 +229,13 @@ FILE STATISTICS:
         
         for filename, stats in self.file_stats.items():
             report += f"\n{filename}:\n"
-            report += f"  Lines: {stats['total_lines']}, Errors: {stats['errors']}, Users: {stats['users_extracted']}\n"
+            report += f"  Lines: {stats['total_lines']}, Errors: {stats['errors']}, Users (Entries): {stats['users_extracted']}\n"
         
         report += f"""
 {'='*60}
 USER STATISTICS:
 {'-'*60}
-Total Users: {len(df)}
-Verified: {df['verified'].sum()} ({df['verified'].sum()/len(df)*100:.1f}%)
-Core Users: {df['core_user'].sum()} ({df['core_user'].sum()/len(df)*100:.1f}%)
-
-Gender: {dict(df['gender'].value_counts())}
-
-Averages:
-  Followers: {df['followers_count'].mean():.0f}
-  Following: {df['following_count'].mean():.0f}
-  Posts: {df['posts_count'].mean():.0f}
-  Influence: {df['influence_score'].mean():.2f}
-  
-  (已移除 Age 统计)
-
-Top Provinces:
-{df['province'].value_counts().head(5).to_string()}
-{'='*60}
-"""
-        # 注意: 上面 report 字符串中的 '  (已移除 Age 统计)' 只是一个注释，
-        # 实际代码中已将 `  Age: {df['age'].mean():.1f}` 这一行删除。
-        # 为避免混淆，我将把它从最终报告中也删除。
-        
-        # 修正 generate_report (删除 Age 行)
-        df = pd.DataFrame(self.users_data)
-        
-        report = f"""
-{'='*60}
-OASIS Data Conversion Report
-{'='*60}
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-Input: {INPUT_FOLDER}
-Output: {OUTPUT_FOLDER}
-
-FILE STATISTICS:
-{'-'*60}
-"""
-        
-        for filename, stats in self.file_stats.items():
-            report += f"\n{filename}:\n"
-            report += f"  Lines: {stats['total_lines']}, Errors: {stats['errors']}, Users: {stats['users_extracted']}\n"
-        
-        report += f"""
-{'='*60}
-USER STATISTICS:
-{'-'*60}
-Total Users: {len(df)}
+Total Unique Users: {len(df)}
 Verified: {df['verified'].sum()} ({df['verified'].sum()/len(df)*100:.1f}%)
 Core Users: {df['core_user'].sum()} ({df['core_user'].sum()/len(df)*100:.1f}%)
 
