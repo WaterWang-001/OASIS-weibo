@@ -24,6 +24,7 @@ DB_NAME = "social_media.db"
 
 USER_SCHEMA_SQL = "user.sql"
 POST_SCHEMA_SQL = "post.sql"
+INTERVENTION_MESSAGE_SCHEMA_SQL="intervention_message.sql"
 FOLLOW_SCHEMA_SQL = "follow.sql"
 MUTE_SCHEMA_SQL = "mute.sql"
 LIKE_SCHEMA_SQL = "like.sql"
@@ -38,10 +39,16 @@ PRODUCT_SCHEMA_SQL = "product.sql"
 GROUP_SCHEMA_SQL = "chat_group.sql"
 GROUP_MEMBER_SCHEMA_SQL = "group_member.sql"
 GROUP_MESSAGE_SCHEMA_SQL = "group_message.sql"
+LOG_ATTITUDE_LIFESTYLE_CULTURE_SCHEMA_SQL = "log_attitude_lifestyle_culture.sql"
+LOG_ATTITUDE_SPORT_ENT_SCHEMA_SQL = "log_attitude_sport_ent.sql"
+LOG_ATTITUDE_SCI_HEALTH_SCHEMA_SQL = "log_attitude_sci_health.sql"
+LOG_ATTITUDE_POLITICS_ECON_SCHEMA_SQL = "log_attitude_politics_econ.sql"
+LOG_ATTITUDE_AVERAGE_SCHEMA_SQL = "log_attitude_average.sql"
 
 TABLE_NAMES = {
     "user",
     "post",
+    "intervention_message",
     "follow",
     "mute",
     "like",
@@ -56,6 +63,11 @@ TABLE_NAMES = {
     "group",
     "group_member",
     "group_message",
+    "log_attitude_lifestyle_culture",
+    "log_attitude_sport_ent",
+    "log_attitude_sci_health",
+    "log_attitude_politics_econ",
+    "log_attitude_average",
 }
 
 
@@ -125,6 +137,9 @@ def create_db(db_path: str | None = None):
             cursor, schema_dir, POST_SCHEMA_SQL, "post"
         )
         _execute_schema_if_not_exists(
+            cursor, schema_dir, INTERVENTION_MESSAGE_SCHEMA_SQL, "intervention_message"
+        )
+        _execute_schema_if_not_exists(
             cursor, schema_dir, FOLLOW_SCHEMA_SQL, "follow"
         )
         _execute_schema_if_not_exists(
@@ -157,7 +172,7 @@ def create_db(db_path: str | None = None):
         _execute_schema_if_not_exists(
             cursor, schema_dir, PRODUCT_SCHEMA_SQL, "product"
         )
-        # (注意：文件名是 chat_group.sql，表名是 chat_group)
+    
         _execute_schema_if_not_exists(
             cursor, schema_dir, GROUP_SCHEMA_SQL, "chat_group"
         )
@@ -166,6 +181,21 @@ def create_db(db_path: str | None = None):
         )
         _execute_schema_if_not_exists(
             cursor, schema_dir, GROUP_MESSAGE_SCHEMA_SQL, "group_message"
+        )
+        _execute_schema_if_not_exists(
+            cursor, schema_dir, LOG_ATTITUDE_LIFESTYLE_CULTURE_SCHEMA_SQL, "log_attitude_lifestyle_culture"
+        )
+        _execute_schema_if_not_exists(
+            cursor, schema_dir, LOG_ATTITUDE_SPORT_ENT_SCHEMA_SQL, "log_attitude_sport_ent"
+        )
+        _execute_schema_if_not_exists(
+            cursor, schema_dir, LOG_ATTITUDE_SCI_HEALTH_SCHEMA_SQL, "log_attitude_sci_health"
+        )
+        _execute_schema_if_not_exists(
+            cursor, schema_dir, LOG_ATTITUDE_POLITICS_ECON_SCHEMA_SQL, "log_attitude_politics_econ"
+        )
+        _execute_schema_if_not_exists(
+            cursor, schema_dir, LOG_ATTITUDE_AVERAGE_SCHEMA_SQL, "log_attitude_average"
         )
 
         # Commit the changes:

@@ -17,7 +17,9 @@ import os
 from datetime import datetime
 from typing import List, Union
 
-from oasis.environment.env_action import LLMAction, ManualAction
+# --- [!! 修改 1: 导入 HeuristicAction !!] ---
+from oasis.environment.env_action import (LLMAction, ManualAction,
+                                          HeuristicAction)
 from oasis.social_agent.agent import SocialAgent
 from oasis.social_agent.agent_graph import AgentGraph
 # 【!! 关键 !!】确保这个 import 路径是正确的
@@ -53,7 +55,9 @@ class OasisEnv:
         agent_graph: AgentGraph,
         platform: Union[DefaultPlatformType, Platform],
         database_path: str = None,
+        calibration_end: datetime =None,
         semaphore: int = 128,
+        intervention_file_path: str = None,
     ) -> None:
         r"""Init the oasis environment.
 
@@ -84,6 +88,7 @@ class OasisEnv:
                     refresh_rec_post_count=2,
                     max_rec_post_len=2,
                     following_post_count=3,
+                    intervention_file_path=intervention_file_path
                 )
                 self.platform_type = DefaultPlatformType.TWITTER
             elif platform == DefaultPlatformType.REDDIT:
@@ -112,10 +117,18 @@ class OasisEnv:
                 self.platform_type = DefaultPlatformType.REDDIT
             else:
                 self.platform_type = DefaultPlatformType.TWITTER
+            if intervention_file_path:
+                if hasattr(self.platform, '_load_interventions_from_csv'):
+                    env_log.info(f"Loading interventions from {intervention_file_path} into pre-existing platform...")
+                    # (这是一个我们即将在 Platform 类中创建的方法)
+                    self.platform._load_interventions_from_csv(intervention_file_path)
+                else:
+                    env_log.warning("OasisEnv received 'intervention_file_path' but the pre-supplied Platform object has no '_load_interventions_from_csv' method.")
         else:
             raise ValueError(
                 f"Invalid platform: {platform}. You should pass a "
                 "DefaultPlatformType or a Platform instance.")
+        
 
     async def reset(self) -> None:
         r"""Start the platform and sign up the agents."""
@@ -123,7 +136,7 @@ class OasisEnv:
         
        
         self.agent_graph = await generate_custom_agents(
-            platform=self.platform, agent_graph=self.agent_graph)
+            platform=self.platform, agent_graph=self.agent_graph,CALIBRATION_END=self.calibration_end,time_step_minutes=3)
         
 
     async def _perform_llm_action(self, agent):
@@ -139,17 +152,20 @@ class OasisEnv:
             return await agent.perform_interview(interview_prompt)
 
     async def step(
-        self, actions: dict[SocialAgent, Union[ManualAction, LLMAction,
+        self, 
+        actions: dict[SocialAgent, Union[ManualAction, LLMAction, HeuristicAction,
                                                List[Union[ManualAction,
-                                                          LLMAction]]]]
+                                                          LLMAction,
+                                                          HeuristicAction]]]]
     ) -> None:
         r"""Update the recommendation system and perform the actions.
 
         Args:
-            actions(dict[SocialAgent, Union[ManualAction, LLMAction,
-                List[Union[ManualAction, LLMAction]]]]): The actions to
-                perform, including the manual(pre-defined) actions and llm
-                actions.
+            actions(dict[SocialAgent, Union[ManualAction, LLMAction, 
+                HeuristicAction, List[...]]]): The actions to perform.
+                - ManualAction: Pre-defined actions (e.g., post, like).
+                - LLMAction: Triggers the agent's LLM reasoning.
+                - HeuristicAction: Triggers the agent's .step() method.
         Returns:
             None
         """
@@ -178,6 +194,17 @@ class OasisEnv:
                                     **single_action.action_args))
                     elif isinstance(single_action, LLMAction):
                         tasks.append(self._perform_llm_action(agent))
+                    
+
+                    elif isinstance(single_action, HeuristicAction):
+                        # 确保 agent 真的有 .step() 方法
+                        if hasattr(agent, 'step') and callable(agent.step):
+                            tasks.append(agent.step())
+                        else:
+                            env_log.warning(f"Agent {agent.agent_id} "
+                                            "received HeuristicAction but "
+                                            "has no .step() method.")
+                    # --- [!! 修改结束 !!] ---
             else:
                 if isinstance(action, ManualAction):
                     if action.action_type == ActionType.INTERVIEW:
@@ -193,6 +220,17 @@ class OasisEnv:
                                 action.action_type, **action.action_args))
                 elif isinstance(action, LLMAction):
                     tasks.append(self._perform_llm_action(agent))
+                
+                # --- [!! 修改 4: 添加 HeuristicAction 的处理 (single) !!] ---
+                elif isinstance(action, HeuristicAction):
+                    # 确保 agent 真的有 .step() 方法
+                    if hasattr(agent, 'step') and callable(agent.step):
+                        tasks.append(agent.step())
+                    else:
+                        env_log.warning(f"Agent {agent.agent_id} "
+                                        "received HeuristicAction but "
+                                        "has no .step() method.")
+                # --- [!! 修改结束 !!] ---
 
         # Execute all tasks concurrently
         await asyncio.gather(*tasks)

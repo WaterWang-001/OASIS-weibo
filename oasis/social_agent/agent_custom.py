@@ -5,8 +5,7 @@
 import random
 import asyncio
 import numpy as np
-from typing import TYPE_CHECKING, Optional, Union, List, Callable
-
+from typing import TYPE_CHECKING, Optional, Union, List, Callable, Dict
 # 核心 CAMEL 导入
 from camel.agents import ChatAgent
 from camel.messages import BaseMessage

@@ -31,6 +31,9 @@ class Environment(ABC):
 class SocialEnvironment(Environment):
     followers_env_template = Template("I have $num_followers followers.")
     follows_env_template = Template("I have $num_follows follows.")
+    broadcast_env_template = Template(
+        "You see the following global broadcast messages: $broadcasts"
+    )
 
     posts_env_template = Template(
         "After refreshing, you see some posts $posts")
@@ -46,22 +49,40 @@ class SocialEnvironment(Environment):
         "are already in")
     env_template = Template(
         "$groups_env\n"
+        "$broadcast_env\n"
         "$posts_env\npick one you want to perform action that best "
         "reflects your current inclination based on your profile and "
         "posts content. Do not limit your action in just `like` to like posts")
+ 
 
     def __init__(self, action: SocialAction):
         self.action = action
 
-    async def get_posts_env(self) -> str:
-        posts = await self.action.refresh()
-        # TODO: Replace posts json format string to other formats
-        if posts["success"]:
-            posts_env = json.dumps(posts["posts"], indent=4)
+    def get_posts_env(self, refresh_data: dict) -> str:
+        r""" (已修改) 从已获取的 refresh_data 中格式化帖子部分 """
+        # (移除了 await self.action.refresh())
+        if refresh_data.get("success") and refresh_data.get("posts"):
+            # (使用传入的 "posts" 键)
+            posts_env = json.dumps(refresh_data["posts"], indent=4)
             posts_env = self.posts_env_template.substitute(posts=posts_env)
         else:
             posts_env = "After refreshing, there are no existing posts."
         return posts_env
+    
+
+    def get_broadcast_env(self, refresh_data: dict) -> str:
+        r""" 从已获取的 refresh_data 中格式化广播消息部分 """
+        broadcasts = refresh_data.get("broadcast_messages")
+        
+        if broadcasts:
+            broadcast_env = json.dumps(broadcasts, indent=4)
+            broadcast_env = self.broadcast_env_template.substitute(
+                broadcasts=broadcast_env
+            )
+        else:
+            broadcast_env = "" 
+        return broadcast_env
+  
 
     async def get_followers_env(self) -> str:
         # TODO: Implement followers env
@@ -86,21 +107,42 @@ class SocialEnvironment(Environment):
             groups_env = "No groups."
         return groups_env
 
+    # --- [!! 修改: 重构 to_text_prompt 以提高效率 !!] ---
     async def to_text_prompt(
         self,
         include_posts: bool = True,
         include_followers: bool = False,
         include_follows: bool = False,
     ) -> str:
+        
+        # 1. (效率优化) 只调用一次 refresh()
+        refresh_data = {}
+        if include_posts:
+            try:
+                refresh_data = await self.action.refresh()
+            except Exception as e:
+                print(f"Error during action.refresh(): {e}")
+                # (确保 refresh_data 至少是一个空字典)
+                refresh_data = {"success": False, "error": str(e), "posts": [], "broadcast_messages": []}
+
+        # 2. 获取其他异步部分
         followers_env = (await self.get_followers_env()
                          if include_follows else "No followers.")
         follows_env = (await self.get_follows_env()
                        if include_followers else "No follows.")
-        posts_env = await self.get_posts_env() if include_posts else ""
+        groups_env = await self.get_group_env()
+        
+        # 3. (修改) 调用非异步辅助函数
+        posts_env = (self.get_posts_env(refresh_data) 
+                     if include_posts else "")
+        broadcast_env = (self.get_broadcast_env(refresh_data)
+                         if include_posts else "")
 
+        # 4. (修改) 注入所有 substitution
         return self.env_template.substitute(
             followers_env=followers_env,
             follows_env=follows_env,
             posts_env=posts_env,
-            groups_env=await self.get_group_env(),
+            broadcast_env=broadcast_env, 
+            groups_env=groups_env,
         )

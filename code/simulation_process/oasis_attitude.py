@@ -6,7 +6,7 @@ import asyncio
 import logging
 import pandas as pd
 from pathlib import Path
-from attitude_annotator import AttitudeAnnotator
+from attitude_annotator import OpenAIAttitudeAnnotator, VLLMAttitudeAnnotator
 
 class OasisAttitudeProcessor:
     """
@@ -51,8 +51,10 @@ class OasisAttitudeProcessor:
         self.ANNOTATE_POST_TABLE = annotate_post_table
         self.ANNOTATE_GT_POST_TABLE = annotate_gt_post_table
         self.GENERATE_USER_SCORES_CSV = generate_user_scores_csv
+        
 
         self.annotator = None
+        self.VLLM_MODEL_PATH = "/remote-home/JuelinW/oasis_project/Qwen2.5-7B-Instruct"
         # 日志
         logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -62,15 +64,19 @@ class OasisAttitudeProcessor:
 
     def _init_annotator(self):
         if self.annotator is None:
-            if not self.API_KEY:
-                raise ValueError("API_KEY 未配置，无法初始化 AttitudeAnnotator")
-            self.annotator = AttitudeAnnotator(
-                api_key=self.API_KEY,
-                base_url=self.BASE_URL,
+            self.annotator = VLLMAttitudeAnnotator(
+                model_name=self.VLLM_MODEL_PATH,
                 attitude_columns=self.ATTITUDE_COLUMNS,
-                batch_size=self.BATCH_SIZE,
-                concurrency_limit=self.API_CONCURRENCY_LIMIT
+                concurrency_limit=1,
+                log_interval_posts=100
             )
+            # self.annotator = OpenAIAttitudeAnnotator(
+            #     api_key=self.API_KEY,
+            #     base_url=self.BASE_URL,
+            #     attitude_columns=self.ATTITUDE_COLUMNS,
+            #     batch_size=self.BATCH_SIZE,
+            #     concurrency_limit=self.API_CONCURRENCY_LIMIT
+            # )
 
     def generate_user_scores_to_csv(self):
         """
@@ -153,8 +159,6 @@ class OasisAttitudeProcessor:
         """
         异步方法：根据配置标注 post / ground_truth_post 表
         """
-        if (self.ANNOTATE_POST_TABLE or self.ANNOTATE_GT_POST_TABLE) and (not self.API_KEY):
-            raise ValueError("标注已启用但 API_KEY 未配置。")
 
         if self.ANNOTATE_POST_TABLE or self.ANNOTATE_GT_POST_TABLE:
             self._init_annotator()
@@ -163,7 +167,7 @@ class OasisAttitudeProcessor:
         try:
             if self.ANNOTATE_POST_TABLE:
                 logging.info("开始标注 post 表 (校准集)...")
-                await self.annotator.annotate_table(self.OASIS_DB_PATH, "post", only_sim_posts=True)
+                await self.annotator.annotate_table(self.OASIS_DB_PATH, "post", only_sim_posts=False)
                 results['post'] = True
             if self.ANNOTATE_GT_POST_TABLE:
                 logging.info("开始标注 ground_truth_post 表...")
@@ -201,10 +205,10 @@ class OasisAttitudeProcessor:
 # 兼容脚本直接运行
 if __name__ == "__main__":
     proc = OasisAttitudeProcessor(
-        oasis_db_path='data/oasis/oasis_database_3000_random.db',
-        user_csv_path='data/oasis/oasis_agent_init_3000_random.csv',
-        user_csv_output_path='data/oasis/oasis_agent_init_3000_random.csv',
-        api_key="sk-tsmw9XQGmKWkE1CvpPCOG2YpLgnYdGisi54GVU0Lf0GFW9rN",
+        oasis_db_path='oasis_test/oasis/oasis_database_100000_random.db',
+        user_csv_path='oasis_test/oasis/oasis_agent_init_100000_random.csv',
+        user_csv_output_path='oasis_test/oasis/oasis_agent_init_100000_random.csv',
+        api_key="",
         annotate_post_table=True,
         annotate_gt_post_table=True,
         generate_user_scores_csv=True

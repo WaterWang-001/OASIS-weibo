@@ -19,20 +19,21 @@ import os
 import random
 import sqlite3
 import sys
+import pandas as pd  # <--- [!! 新增导入 !!]
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, List, Dict, Union  # <--- [!! 新增导入 !!]
 
 from oasis.clock.clock import Clock
 from oasis.social_platform.channel import Channel
 from oasis.social_platform.database import (create_db,
-                                            fetch_rec_table_as_matrix,
-                                            fetch_table_from_db)
+                                          fetch_rec_table_as_matrix,
+                                          fetch_table_from_db)
 from oasis.social_platform.platform_utils import PlatformUtils
 from oasis.social_platform.recsys import (rec_sys_personalized_twh,
                                           rec_sys_personalized_with_trace,
                                           rec_sys_random, rec_sys_reddit)
 from oasis.social_platform.typing import ActionType, RecsysType
-
+pl_log = logging.getLogger("oasis.platform")
 # Create log directory if it doesn't exist
 log_dir = "./log"
 if not os.path.exists(log_dir):
@@ -66,6 +67,7 @@ class Platform:
         max_rec_post_len: int = 2,
         following_post_count=3,
         use_openai_embedding: bool = False,
+        intervention_file_path: str = None,
     ):
         self.db_path = db_path
         self.recsys_type = recsys_type
@@ -124,6 +126,9 @@ class Platform:
             self.recsys_type,
             self.report_threshold,
         )
+        if intervention_file_path:
+            self._load_interventions_from_csv(intervention_file_path)
+
 
     async def running(self):
         while True:
@@ -255,13 +260,23 @@ class Platform:
         # except Exception as e:
         #     return {"success": False, "error": str(e)}
 
+    # --- [!! 关键修改区域开始 !!] ---
     async def refresh(self, agent_id: int):
         # Retrieve posts for a specific id from the rec table
+
+        # [!! 1. 统一获取整数时间步 !!]
+        try:
+            int_time_step = self.sandbox_clock.get_time_step()
+        except AttributeError:
+            pl_log.error("Platform missing 'sandbox_clock.get_time_step'")
+            return {"success": False, "error": "Platform missing 'sandbox_clock.get_time_step'", "posts": [], "broadcast_messages": []}
+
         if self.recsys_type == RecsysType.REDDIT:
             current_time = self.sandbox_clock.time_transfer(
                 datetime.now(), self.start_time)
         else:
-            current_time = self.sandbox_clock.get_time_step()
+            current_time = int_time_step # <--- 使用整数时间步
+
         try:
             # 这一行是正确的，"user_id" 在系统中代表 agent_id (例如 131)
             # 它将被用于 'follow' 查询和 'trace' 记录
@@ -330,37 +345,72 @@ class Platform:
                 selected_post_ids = following_posts_ids + selected_post_ids
                 selected_post_ids = list(set(selected_post_ids))
 
-            # --- 🐞 修复开始 (处理空列表) ---
-            # 如果 'selected_post_ids' 在所有步骤后仍然是空的，
-            # (例如 'rec' 表中没有, 'following' 也没有),
-            # 'placeholders' 将为空, SQL 查询将失败。
-            if not selected_post_ids:
-                # 这不是一个错误，只是T=0时没有推荐
-                return {"success": False, "message": "No posts found for this user."}
-            # --- 🐞 修复结束 ---
+            # --- [!! 2. 查询真实帖子 (如果存在) !!] ---
+            results_with_comments = [] # <--- 初始化
+            if selected_post_ids:
+                # (如果 'selected_post_ids' 在所有步骤后仍然是空的,
+                # 'placeholders' 将为空, SQL 查询将失败。所以我们检查)
+                placeholders = ", ".join("?" for _ in selected_post_ids)
 
-            placeholders = ", ".join("?" for _ in selected_post_ids)
+                post_query = (
+                    f"SELECT post_id, user_id, original_post_id, content, "
+                    f"quote_content, created_at, num_likes, num_dislikes, "
+                    f"num_shares FROM post WHERE post_id IN ({placeholders})")
+                self.pl_utils._execute_db_command(post_query, selected_post_ids)
+                results = self.db_cursor.fetchall()
+                
+                if results:
+                    results_with_comments = self.pl_utils._add_comments_to_posts(
+                        results)
+            
+            # (此时 results_with_comments 要么是帖子列表，要么是空列表)
 
-            post_query = (
-                f"SELECT post_id, user_id, original_post_id, content, "
-                f"quote_content, created_at, num_likes, num_dislikes, "
-                f"num_shares FROM post WHERE post_id IN ({placeholders})")
-            self.pl_utils._execute_db_command(post_query, selected_post_ids)
-            results = self.db_cursor.fetchall()
-            if not results:
-                 # 这种情况不应该发生，除非 post_id 错位 (您已否认)
-                return {"success": False, "message": "No posts found (Post ID mismatch)."}
-            results_with_comments = self.pl_utils._add_comments_to_posts(
-                results)
+            # --- [!! 3. 单独获取干预信息 !!] ---
+            broadcast_contents = []  # <--- 初始化空列表
+            try:
+                # 1. 查询 'intervention_message' 表
+                intervention_query = """
+                SELECT content 
+                FROM intervention_message 
+                WHERE time_step = ?
+                """
+                # (我们使用 int_time_step)
+                self.pl_utils._execute_db_command(intervention_query, (int_time_step,))
+                intervention_rows = self.db_cursor.fetchall()
+                
+                # 2. 只提取 content 内容
+                broadcast_contents = [row[0] for row in intervention_rows]
+                if broadcast_contents:
+                    pl_log.info(f"Adding {len(broadcast_contents)} broadcast messages for step {int_time_step}")
 
+            except Exception as e:
+
+                pl_log.error(f"Failed to fetch interventions for step {int_time_step}: {e}")
+            # --- [!! 干预逻辑结束 !!] ---
+
+            # --- [!! 4. 最终检查 !!] ---
+            if not results_with_comments and not broadcast_contents:
+                # 既没有真实帖子, 也没有干预
+                return {"success": False, "message": "No posts or interventions found."}
+
+            # (action_info 保持不变, 只记录真实帖子)
             action_info = {"posts": results_with_comments}
-            # twitter_log.info(action_info)
+            
             self.pl_utils._record_trace(user_id, ActionType.REFRESH.value,
                                         action_info, current_time)
 
-            return {"success": True, "posts": results_with_comments}
+            # --- [!! 5. 修改 Return 结构 !!] ---
+            return {
+                "success": True, 
+                "posts": results_with_comments, # 真实帖子列表
+                "broadcast_messages": broadcast_contents # 干预信息列表
+            }
+        
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            pl_log.error(f"Error in refresh for agent {agent_id}: {e}", exc_info=True)
+            # [!! 6. 修改 Exception Return 结构 !!]
+            return {"success": False, "error": str(e), "posts": [], "broadcast_messages": []}
+    # --- [!! 关键修改区域结束 !!] ---
 
     async def update_rec_table(self):
         # Recsys(trace/user/post table), refresh rec table
@@ -1677,3 +1727,58 @@ class Platform:
             }
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    def _load_interventions_from_csv(self, file_path: str):
+        """
+        (私有) 从 CSV 读取干预数据并加载到 'intervention_message' 表。
+        """
+        pl_log.info(f"Attempting to load interventions from: {file_path}")
+        
+        # 1. 检查文件是否存在
+        if not os.path.exists(file_path):
+            pl_log.warning(f"Intervention file not found: {file_path}. Skipping.")
+            return
+        
+        try:
+            # 2. 读取 CSV
+            df = pd.read_csv(file_path, encoding='utf-8')
+            
+            # 3. 验证 schema (根据您的定义)
+            required_cols = ['time_step', 'content']
+            if not all(col in df.columns for col in required_cols):
+                pl_log.error(
+                    f"Intervention file {file_path} is missing required "
+                    f"columns: {required_cols}. Skipping."
+                )
+                return
+            
+            # 只选择我们需要的列
+            df_to_insert = df[required_cols]
+
+            # 4. 连接数据库并写入
+            # (假设 self.pl_utils 存在并且有 get_db_connection 方法)
+            if not hasattr(self, 'pl_utils') or not hasattr(self.pl_utils, 'get_db_connection'):
+                 pl_log.error("Platform has no 'pl_utils' or 'pl_utils.get_db_connection' for DB connection. Cannot load interventions.")
+                 return
+                 
+            with self.pl_utils.get_db_connection() as conn:
+                pl_log.info("Clearing old interventions from 'intervention_message' table...")
+                # 5. 清除旧数据，确保模拟运行是干净的
+                conn.execute("DELETE FROM intervention_message;")
+                
+                pl_log.info(f"Loading {len(df_to_insert)} new interventions into database...")
+                # 6. 插入新数据
+                df_to_insert.to_sql(
+                    'intervention_message', # 目标表名
+                    con=conn,
+                    if_exists='append', # 追加到刚被清空的表
+                    index=False
+                )
+                conn.commit()
+            
+            pl_log.info(f"Successfully loaded {len(df_to_insert)} interventions.")
+
+        except pd.errors.EmptyDataError:
+            pl_log.warning(f"Intervention file {file_path} is empty. Skipping.")
+        except Exception as e:
+            pl_log.error(f"Failed to load intervention file {file_path}: {e}", exc_info=True)

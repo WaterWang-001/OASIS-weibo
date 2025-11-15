@@ -2,6 +2,7 @@ import sqlite3
 import os
 import sys
 import logging
+import traceback
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
@@ -445,7 +446,6 @@ def save_timeseries_chart(
     except Exception as e:
         logging.error(f"  -> [Type: {agent_type}] ❌ 保存主图表失败: {e}")
         traceback.print_exc()
-
 # --- (save_all_dimensions_timeseries_chart 保持不变) ---
 def save_all_dimensions_timeseries_chart(
     aligned_df: pd.DataFrame, 

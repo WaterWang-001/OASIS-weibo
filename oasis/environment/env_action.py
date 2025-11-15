@@ -43,3 +43,19 @@ class LLMAction:
 
     def init(self):
         pass
+
+@dataclass
+class HeuristicAction:
+    """
+    一个标记动作 (marker action)，用于 OasisEnv。
+    
+    当 env.step() 收到一个 agent 对应的是 HeuristicAction 实例时,
+    它会跳过 LLM 和 ManualAction 的逻辑, 转而直接
+    `await agent.step()`。
+    
+    这允许 HeuristicAgent/ABMAgent (如 LurkerAgent) 的
+    `step()` 逻辑被集成到统一的 env.step() 工作流中。
+    """
+    def __init__(self):
+        # 这个类不需要任何参数, 它只是一个类型标记
+        pass

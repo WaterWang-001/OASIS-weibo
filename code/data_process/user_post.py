@@ -36,18 +36,21 @@ class UserPostProcessor:
         if not file_list:
             raise FileNotFoundError(f"在目录 '{self.input_directory}' 中找不到任何 .txt 文件。")
         return file_list
+    @staticmethod
     def get_user_id(pojo):
         """从POJO中安全地提取用户ID"""
         if not pojo:
             return None
         return pojo.get('sjcjId')
 
+    @staticmethod
     def get_post_timestamp(pojo):
         """从 contentPojo 中安全地提取发布时间戳"""
         if not pojo:
             return None
         return pojo.get('sjcjPublished')
 
+    @staticmethod
     def get_comment_timestamp(pojo):
         """从 commentPojo 中安全地提取发布时间戳"""
         if not pojo:

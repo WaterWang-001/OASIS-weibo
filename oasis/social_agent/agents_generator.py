@@ -24,6 +24,7 @@ from collections import defaultdict
 from datetime import datetime 
 
 import pandas as pd
+import numpy as np
 import tqdm
 import sqlite3
 from camel.memories import MemoryRecord
@@ -650,22 +651,34 @@ def connect_platform_channel(
 async def generate_custom_agents(
     platform: Platform, 
     agent_graph: AgentGraph | None = None,
+    CALIBRATION_END: datetime = None,
+    TIME_STEP_MINUTES: int = 3
 ) -> AgentGraph:
     """
     这个函数现在是 env.reset() 的一部分。
     它 *假定* agent_graph 已经由 generate_twitter_agent_graph() 填充了。
     它 *只* 负责将这个图注册到数据库中。
+    
+    - 不再将 attitude 写入 'user' 表。
+    - 在注册后, 它将 *查询* `ground_truth_post` 表。
+    - 它会计算 T<0 (e.g., -1, -2, ...) 的 *历史* 态度分数 (基于 CALIBRATION_END)
+    - 并将这些历史分数 (逐 agent, 逐 time_step) 写入日志表。
     """
     logger = logging.getLogger("agents_generator")
     
-
+    # --- ( ATTITUDE_COLUMNS 和 Agent 分组定义保持不变 ) ---
     ATTITUDE_COLUMNS = [
         'attitude_lifestyle_culture',
         'attitude_sport_ent',
         'attitude_sci_health',
-        'attitude_politics_econ',
-        'initial_attitude_avg'  # <-- 【!! 在此添加新列 !!】
+        'attitude_politics_econ'
     ]
+    TIER_1_LLM_GROUPS = {
+        "权威媒体/大V", "活跃KOL", "活跃创作者", "普通用户" 
+    }
+    TIER_2_HEURISTIC_GROUPS = {
+        "潜水用户"
+    }
     
     
     if agent_graph is None:
@@ -677,80 +690,84 @@ async def generate_custom_agents(
     
     logger.info("... (generate_custom_agents) 正在准备批量注册用户到数据库 ...")
     
-    # ... (计算 followings_map 和 followers_map 的代码保持不变) ...
+    # --- ( 预计算关注/粉丝 保持不变 ) ---
     logger.info("... (generate_custom_agents) 正在预计算关注数/粉丝数 ...")
     followings_map = defaultdict(set) 
     followers_map = defaultdict(set)
-    all_agent_ids = set(aid for aid, _ in agent_graph.get_agents())
+    all_agent_ids = set(str(aid) for aid, _ in agent_graph.get_agents())
+    
     for agent_id, agent in agent_graph.get_agents():
+        agent_id_str = str(agent_id)
         follow_str = agent.user_info.profile["other_info"].get(
             "following_agentid_list_str", "[]"
         )
         followee_list = _parse_follow_list(follow_str)
         for followee_id in followee_list:
-            if followee_id in all_agent_ids:
-                followings_map[agent_id].add(followee_id)
-                followers_map[followee_id].add(agent_id)
+            if str(followee_id) in all_agent_ids:
+                followings_map[agent_id_str].add(str(followee_id))
+                followers_map[str(followee_id)].add(agent_id_str)
     logger.info(f"... (generate_custom_agents) 关注图构建完成。{len(followings_map)} 个用户有关注列表。")
 
     
     sign_up_list = []
     follow_list = []
     
-    for agent_id, agent in agent_graph.get_agents():
+    # --- [!! 新增: T<0 日志所需 Agent 映射 !!] ---
+    agent_id_to_type_map = {} # ( e.g., 1001 -> ('ABM', 'internal_state') )
+    
+    for agent_id_int, agent in agent_graph.get_agents():
         
         user_name = agent.user_info.user_name
         name = agent.user_info.name
         bio = agent.user_info.description
         
         profile_info = agent.user_info.profile["other_info"]
-        user_id = profile_info.get("original_user_id") 
+        user_id_str = profile_info.get("original_user_id") # (e.g., '1618051664')
             
         current_time = datetime.now()
-            
-        num_followings = len(followings_map.get(agent_id, set()))
-        num_followers = len(followers_map.get(agent_id, set()))
         
-        # (此代码不变)
-        # 它现在会自动从 ATTITUDE_COLUMNS 列表中查找 5 个分数
-        att_scores_tuple = tuple(
-            profile_info.get(col, 0.0) for col in ATTITUDE_COLUMNS
-        )
-
+        agent_sim_id_str = str(agent_id_int) # (e.g., '1001')
+        num_followings = len(followings_map.get(agent_sim_id_str, set()))
+        num_followers = len(followers_map.get(agent_sim_id_str, set()))
+        
+        # --- [!! 修改: 不再收集 T-1 日志, 仅收集 Agent 类型 !!] ---
+        agent_sim_id = agent.agent_id # (e.g., 1001)
+        
+        if agent.group in TIER_1_LLM_GROUPS:
+            agent_id_to_type_map[agent_sim_id] = ('LLM', 'external_expression')
+        elif agent.group in TIER_2_HEURISTIC_GROUPS:
+            agent_id_to_type_map[agent_sim_id] = ('ABM', 'internal_state')
+        
         sign_up_list.append((
-            user_id,        # (str)
-            agent_id,       # (int)
+            user_id_str,    # (str)
+            agent_sim_id,   # (int)
             user_name,      # (str)
             name,           # (str)
             bio,            # (str)
             current_time,   # (datetime)
             num_followings, # (int)
             num_followers,  # (int)
-        ) + att_scores_tuple) # (此元组现在包含 5 个分数)
+        ))
         
-        # ... (follow_list.append 的代码保持不变) ...
-        following_id_list = followings_map.get(agent_id, set())
+        # ( follow_list.append 保持不变 )
+        following_id_list = followings_map.get(agent_sim_id_str, set())
         for follow_id in following_id_list:
-            follow_list.append((agent_id, follow_id, current_time))
+            follow_list.append((agent_sim_id, int(follow_id), current_time))
     
-    # (此代码不变)
-    # 它现在会自动构建包含 5 个列名和 5 个 '?' 的 SQL
-    attitude_cols_sql = ", ".join(ATTITUDE_COLUMNS)
-    attitude_placeholders = ", ".join(["?" for _ in ATTITUDE_COLUMNS])
-
+    # --- ( user_insert_query 保持不变 ) ---
     user_insert_query = (
         f"INSERT OR IGNORE INTO user (user_id, agent_id, user_name, name, bio, "
-        f"created_at, num_followings, num_followers, {attitude_cols_sql}) VALUES "
-        f"(?, ?, ?, ?, ?, ?, ?, ?, {attitude_placeholders})"
+        f"created_at, num_followings, num_followers) VALUES "
+        f"(?, ?, ?, ?, ?, ?, ?, ?)"
     )
     
     platform.pl_utils._execute_many_db_command(user_insert_query,
                                                sign_up_list,
                                                commit=True)
     
-    logger.info(f"... (generate_custom_agents) 成功注册 {len(sign_up_list)} 个用户 (包含 Attitude)。")
+    logger.info(f"... (generate_custom_agents) 成功注册 {len(sign_up_list)} 个用户 (无 Attitude)。")
     
-    # ... (follow_insert_query 和 platform.pl_utils 保持不变) ...
+    # --- ( follow_insert_query 保持不变 ) ---
     follow_insert_query = (
         "INSERT OR IGNORE INTO follow (follower_id, followee_id, created_at) "
         "VALUES (?, ?, ?)")
@@ -758,6 +775,117 @@ async def generate_custom_agents(
                                               follow_list,
                                               commit=True)
     logger.info(f"... (generate_custom_agents) 成功插入 {len(follow_list)} 条关注关系。")
+    
+    
+    # --- [!! 重写: 记录 T<0 历史态度日志 (基于post) !!] ---
+    if CALIBRATION_END is None:
+        logger.warning("... (generate_custom_agents) 未提供 CALIBRATION_END, 跳过 T<0 历史态度日志记录。")
+    else:
+        logger.info(f"... (generate_custom_agents) 正在计算 T<0 历史态度日志 (基于 {CALIBRATION_END})...")
+        
+        try:
+            conn = platform.pl_utils.db_conn
+            
+            # 1. 查询: `JOIN` `user` (我们刚创建的) 和 `post`
+            att_cols_sql = ", ".join([f"T1.{col}" for col in ATTITUDE_COLUMNS])
+            query = f"""
+            SELECT 
+                T1.created_at, 
+                T1.user_id, 
+                T2.agent_id,
+                {att_cols_sql}
+            FROM post AS T1
+            INNER JOIN user AS T2 ON T1.user_id = T2.user_id
+            WHERE T1.created_at < ? AND T1.attitude_annotated = 1
+            """
+            
+            df_history = pd.read_sql_query(
+                query, 
+                conn, 
+                params=(CALIBRATION_END.strftime("%Y-%m-%d %H:%M:%S"),)
+            )
+            
+            if df_history.empty:
+                logger.info("... (generate_custom_agents) 未在 T<0 范围内找到已标注的历史帖子。")
+                return agent_graph # (仍然返回 graph)
+
+            logger.info(f"... (generate_custom_agents) 找到 {len(df_history)} 条 T<0 历史帖子。")
+
+            # 2. 计算历史 time_step
+            df_history['created_at_dt'] = pd.to_datetime(df_history['created_at'])
+            
+            # (计算距离 CALIBRATION_END 的秒数)
+            delta_seconds = (CALIBRATION_END - df_history['created_at_dt']).dt.total_seconds()
+            
+            # (计算 time_step: 1-180s -> -1; 181-360s -> -2)
+            time_step_col = -((delta_seconds // (TIME_STEP_MINUTES * 60)) + 1).astype(int)
+            df_history['time_step'] = time_step_col
+
+            # 3. 按 (agent, time_step) 聚合, 计算平均态度
+            df_grouped = df_history.groupby(
+                ['time_step', 'user_id', 'agent_id']
+            )[ATTITUDE_COLUMNS].mean().reset_index()
+
+            # 4. 映射 Agent 类型
+            df_grouped['agent_type_metric'] = df_grouped['agent_id'].map(agent_id_to_type_map)
+            df_grouped = df_grouped.dropna(subset=['agent_type_metric']) # 移除不在模拟中的 agents
+            df_grouped['agent_type'] = df_grouped['agent_type_metric'].apply(lambda x: x[0])
+            df_grouped['metric_type'] = df_grouped['agent_type_metric'].apply(lambda x: x[1])
+
+            # 5. 准备批量插入
+            all_dims_to_log = ATTITUDE_COLUMNS + ['attitude_average']
+            batch_insert_data = []
+            
+            for row in df_grouped.itertuples(index=False):
+                scores_dict = {col: getattr(row, col) for col in ATTITUDE_COLUMNS}
+                
+                # 计算总平均分
+                valid_scores = [s for s in scores_dict.values() if s is not None]
+                overall_avg = np.mean(valid_scores) if valid_scores else 0.0
+                scores_dict['attitude_average'] = overall_avg
+                
+                # 为 5 个维度准备插入
+                for dim_name in all_dims_to_log:
+                    table_name = f"log_{dim_name}"
+                    score_to_log = scores_dict.get(dim_name)
+                    if score_to_log is not None:
+                        batch_insert_data.append((
+                            table_name,
+                            row.time_step,
+                            row.user_id,
+                            row.agent_id,
+                            row.agent_type,
+                            row.metric_type,
+                            score_to_log
+                        ))
+
+            # 6. 执行批量插入
+            if not batch_insert_data:
+                logger.info("... (generate_custom_agents) 聚合后没有 T<0 日志需要插入。")
+            else:
+                cursor = conn.cursor()
+                inserted_count = 0
+                for (tbl, ts, uid, aid, atype, mtype, score) in batch_insert_data:
+                    try:
+                        cursor.execute(
+                            f"""
+                            INSERT INTO {tbl} (
+                                time_step, user_id, agent_id, agent_type, metric_type, attitude_score
+                            ) VALUES (?, ?, ?, ?, ?, ?)
+                            """,
+                            (ts, uid, aid, atype, mtype, score)
+                        )
+                        inserted_count += 1
+                    except sqlite3.Error as e:
+                        logger.error(f"... (generate_custom_agents) 写入 T<0 日志表 '{tbl}' 失败 (Agent {aid}, Step {ts}): {e}")
+                
+                conn.commit()
+                logger.info(f"... (generate_custom_agents) 成功将 {inserted_count} 条 T<0 历史分数 (5 维 * N agents * M steps) 写入日志表。")
+
+        except Exception as e:
+            logger.error(f"... (generate_custom_agents) 记录 T<0 历史态度日志时意外出错: {e}", exc_info=True)
+    # --- [!! 重写结束 !!] ---
+    
     
     logger.info("... (generate_custom_agents) 已跳过 post 插入 (假设数据库已由 init_post_tables.py 填充)。")
     
@@ -838,7 +966,7 @@ async def generate_twitter_agent_graph(
     
     # --- 2. 遍历并创建数据 (分两步) ---
     
- # 步骤 A: 遍历 Heuristic Agents (Tier 2)
+    # 步骤 A: 遍历 Heuristic Agents (Tier 2)
     logger.info(f"(Graph Build) 正在为 {len(tier2_info)} 个 Heuristic Agents (Tier 2) 创建对象...")
     for agent_id, row in tqdm.tqdm(tier2_info.iterrows(), total=len(tier2_info), desc="Building Heuristic Agents"):
         
@@ -871,7 +999,6 @@ async def generate_twitter_agent_graph(
         
         agent_env = SocialAction(agent_id=agent_id, channel=None)
 
-        # --- 【!! 关键修改: ABM Agent 初始化 !!】 ---
         
        
         agent = AgentClass(
@@ -881,7 +1008,7 @@ async def generate_twitter_agent_graph(
             )
         
         agent_graph.add_agent(agent)
-        # --- 【!! 修改结束 !!】 ---
+     
             
 
             
